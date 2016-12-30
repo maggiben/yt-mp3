@@ -12,6 +12,32 @@ const memfs = require('memfs');
 const unionfs = require('unionfs');
 const Stream = require('stream');
 const concat = require('concat-stream');
+const ffmpeg = require('fluent-ffmpeg');
+const moment = require('moment');
+
+'use strict';
+const acoustid = require("acoustid");
+const NodeBrainz = require('nodebrainz');
+const Coverart = require('coverart')
+// Initialize NodeBrainz
+var nodebrainz = new NodeBrainz({userAgent:'my-awesome-app/0.0.1 ( http://my-awesome-app.com )'});
+var coverart = new Coverart({userAgent:'my-awesome-app/0.0.1 ( http://my-awesome-app.com )'});
+/*
+acoustid("musics/audio3.mp3", { key: "7h2L5KuGA2" }, function(err, results) {
+    if (err) throw err;
+    let artist = results[0].recordings[0].artists[0].name;
+    //console.log(JSON.stringify(results,0,2));
+    console.log('artist: ', artist)
+});
+
+nodebrainz.artist('e0140a67-e4d1-4f13-8a01-364355bee46e', {inc:'releases+release-groups+aliases'}, function(err, response){
+    console.log(response);
+});
+
+coverart.releaseGroup('4dff2c59-0907-4a36-b18b-462a17909d35', function(err, response){
+    console.log('cover:', response, err);
+});
+*/
 
 class EchoStream extends Stream.Writable {
     constructor(options) {
@@ -120,6 +146,41 @@ class Youtube {
         });
     }
 
+    costox () {
+        var url = 'https://www.youtube.com/watch?v=1w7OgIMMRc4';
+        var audioOutput = path.resolve(__dirname, 'sound.mp4');
+        ytdl(url, { 
+            filter: function(f) {
+                return f.container === 'mp4' && !f.encoding; 
+            } 
+        })
+        .on('info', function (info) {
+            //console.log(JSON.stringify(info,0,2))
+        })
+        // Write audio to file since ffmpeg supports only one input stream.
+        .pipe(fs.createWriteStream(audioOutput))
+        .on('finish', function() {
+            ffmpeg()
+            .input(ytdl(url, { filter: function(f) {
+                return f.container === 'mp4' && !f.audioEncoding; } 
+            }))
+            .videoCodec('copy')
+            .input(audioOutput)
+            .audioCodec('copy')
+            .save(path.resolve(__dirname, 'output.mp4'))
+            .on('error', console.error)
+            .on('progress', function(progress) {
+                process.stdout.cursorTo(0);
+                process.stdout.clearLine(1);
+                //process.stdout.write(progress.timemark);
+                console.log(progress)
+            })
+            .on('end', function() {
+                console.log();
+            });
+        });
+    }
+
     convert (fileName) {
         let inputFile = path.resolve(__dirname, this.videoDir, fileName);
         let outputFile = path.resolve(__dirname, this.musicDir, fileName);
@@ -147,6 +208,41 @@ class Youtube {
         // Write out.webm to disk.
         var out = result.MEMFS[0];
         fs.writeFileSync(outputFile, Buffer(out.data));
+    }
+
+    videoDownload() {
+        let p = path.resolve(__dirname);
+        let concatStream = concat(function(x) {
+            console.log(x.length)
+        })
+        let options = {
+            //quality: 'highest',
+            downloadURL: true,
+            //filter: 'audioonly'
+        }
+        let mux = new EchoStream({
+            //highWaterMark: 120141, //999999,
+            writable: true
+        });
+        let url = 'https://www.youtube.com/watch?v=1w7OgIMMRc4'
+        let stream = ytdl(url, options);
+        stream
+        .pipe(mux)
+        .on('info', (info, format) => {
+            fs.stat(p, (error, stats) => {
+                if (error) {
+                    fs.mkdirSync(p);
+                }
+                console.log('download', info.title);
+                this.createSong(stream);
+            });
+        })
+        .on('finish', () => {
+            this.coco(mux.toArray())
+        })
+        .on('error', (error) => {
+            //self.emit('error', error);
+        });
     }
 
     downloadVideo (video) {
@@ -181,12 +277,12 @@ class Youtube {
             .on('close', () => {
                 console.log('downloadVideo: close')
             })
-            .on('finish', () => {
+            /*.on('finish', () => {
                 //console.log('finish', arguments)
                 this.coco(mux.toArray())
                 //fs.writeFileSync('woot', mux.toBuffer());
                 return resolve(sanitize(video.snippet.title))
-            })
+            })*/
             .on('error', function (error) {
                 console.log('error:', error)
                 return reject(error);
@@ -229,6 +325,23 @@ class Youtube {
         fs.writeFileSync(out.name, Buffer(out.data));
     }
 
+    createSong(stream) {
+      let x = new ffmpeg(stream)
+        .audioBitrate(192)
+        .saveToFile('out.mp3')
+        .on('end', function() {
+            console.log('converted!')
+        })
+        .on('progress', function(progress) {
+            process.stdout.cursorTo(0);
+            process.stdout.clearLine(1);
+            process.stdout.write(progress.timemark);
+        })
+        .on('end', function() {
+            console.log('end conversion!')
+        })
+    }
+
     getWoot() {
         let infile = fs.createReadStream('index.js');
 
@@ -240,11 +353,6 @@ class Youtube {
             console.log(this.myStream.toString())
             //this.coco(this.myStream.toArray())
         });
-
-        //var testData = new Uint8Array(fs.readFileSync('./videos/video'));
-
-        //this.coco(testData)
-
     }
 
     getPlayListItems(playlistId) {
@@ -292,9 +400,12 @@ function xxx() {
 
         let videoIds = items.map(item => item.snippet.resourceId.videoId);
         youtube.getVideos(videoIds).then(videos => {
-            console.log(JSON.stringify(videos.items.map(video => `${video.id}, ${video.snippet.title}`), 0, 2))
-
-            //youtube.convert("Guns N' Roses - Sweet Child O' Mine")
+            
+            let duration = videos.items[0].contentDetails.duration;
+            let m = moment.duration(duration).asMilliseconds();
+            let dd = moment.utc(m).format("HH:mm:ss.SSS");
+            //console.log(JSON.stringify(dd, 0, 2))
+            console.log(JSON.stringify(videos.items.map(video => `${video.id}, ${video.snippet.title} - ${dd}`), 0, 2))
 
             youtube.downloadVideo(videos.items[1]).then(result => {
                 console.log('downloadVideo complete!', result)
@@ -312,7 +423,9 @@ function xxx() {
         //console.log(JSON.stringify(items.map(x => x.snippet.resourceId.videoId), 0, 2))
     })
 }
-xxx()
+//xxx()
+youtube.videoDownload()
+//youtube.costox()
 //youtube.getWoot()
 
 
