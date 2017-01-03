@@ -109,6 +109,189 @@ class EchoStream extends Stream.Writable {
     }
 }
 
+/**
+* Creates a line ring buffer object with the following methods:
+* - append(str) : appends a string or buffer
+* - get() : returns the whole string
+* - close() : prevents further append() calls and does a last call to callbacks
+* - callback(cb) : calls cb for each line (incl. those already in the ring)
+*
+* @param {Numebr} maxLines maximum number of lines to store (<= 0 for unlimited)
+*/
+class LinesRing {
+    constructor(maxLines) {
+        this.callbacks = new Array();
+        this.lines = new Array();
+        this.current = null;
+        this.closed = false;
+        this.max = maxLines - 1;
+        this.newLineRegExp = /\r\n|\r|\n/g;
+    }
+
+    emit (line) {
+        this.callbacks.forEach(function(callback) {
+            callback.apply(this, [line]);
+        });
+    }
+    callback (callback) {
+        this.lines.forEach(function (line) {
+            callback.apply(this, [line]);
+        });
+        this.callbacks.push(callback);
+    }
+    append (string) {
+        if (this.closed) return;
+        if (string instanceof Buffer) string = '' + string;
+        if (!string || string.length === 0) return;
+
+        var newLines = string.split(this.newLineRegExp);
+
+        if (newLines.length === 1) {
+            if (this.current !== null) {
+                this.current = this.current + newLines.shift();
+            } else {
+                this.current = newLines.shift();
+            }
+        } else {
+            if (this.current !== null) {
+                this.current = this.current + newLines.shift();
+                this.emit(this.current);
+                this.lines.push(this.current);
+            }
+
+            this.current = newLines.pop();
+
+            newLines.forEach(function(l) {
+                this.emit(l);
+                this.lines.push(l);
+            });
+
+            if (this.max > -1 && lines.length > this.max) {
+                this.lines.splice(0, this.lines.length - this.max);
+            }
+        }
+    }
+    get () {
+        if (this.current !== null) {
+            return this.lines.concat([this.current]).join('\n');
+        } else {
+            return this.lines.join('\n');
+        }
+    }
+    /**
+    * Convert a [[hh:]mm:]ss[.xxx] timemark into seconds
+    *
+    * @param {String} timemark timemark string
+    * @return Number
+    * @private
+    */
+    timemarkToSeconds (timemark) {
+        if (typeof timemark === 'number') {
+            return timemark;
+        }
+
+        if (timemark.indexOf(':') === -1 && timemark.indexOf('.') >= 0) {
+            return Number(timemark);
+        }
+
+        var parts = timemark.split(':');
+
+        // add seconds
+        var seconds = Number(parts.pop());
+
+        if (parts.length) {
+            // add minutes
+            seconds += Number(parts.pop()) * 60;
+        }
+
+        if (parts.length) {
+            // add hours
+            seconds += Number(parts.pop()) * 3600;
+        }
+
+        return seconds;
+    }
+    /**
+    * Extract progress data from ffmpeg stderr and emit 'progress' event if appropriate
+    *
+    * @param {FfmpegCommand} command event emitter
+    * @param {String} stderrLine ffmpeg stderr data
+    * @param {Number} [duration=0] expected output duration in seconds
+    * @private
+    */
+
+    extractProgress (stderrLine, duration) {
+        var progress = this.parseProgressLine(stderrLine);
+
+        if (progress) {
+            // build progress report object
+            var result = {
+                frames: parseInt(progress.frame, 10),
+                currentFps: parseInt(progress.fps, 10),
+                currentKbps: progress.bitrate ? parseFloat(progress.bitrate.replace('kbits/s', '')) : 0,
+                targetSize: parseInt(progress.size, 10),
+                timemark: progress.time
+            };
+
+            // calculate percent progress using duration
+            if (!isNaN(duration)) {
+                result.percent = (this.timemarkToSeconds(result.timemark) / duration) * 100;
+            }
+            return result;
+        }
+    }
+    /**
+     * Parse progress line from ffmpeg stderr
+     *
+     * @param {String} line progress line
+     * @return progress object
+     * @private
+     */
+    parseProgressLine (line) {
+        var progress = {};
+
+        // Remove all spaces after = and trim
+        line = line.replace(/=\s+/g, '=').trim();
+        var progressParts = line.split(' ');
+
+        // Split every progress part by "=" to get key and value
+        for (var i = 0; i < progressParts.length; i++) {
+            var progressSplit = progressParts[i].split('=', 2);
+            var key = progressSplit[0];
+            var value = progressSplit[1];
+
+            // This is not a progress line
+            if (typeof value === 'undefined')
+                return null;
+
+            progress[key] = value;
+        }
+
+        return progress;
+    }
+
+    close () {
+        if (this.closed) return;
+        if (this.current !== null) {
+            this.emit(this.current);
+            this.lines.push(this.current);
+
+            if (this.max > -1 && this.lines.length > this.max) {
+                this.lines.shift();
+            }
+
+            this.current = null;
+        }
+
+        this.closed = true;
+    }
+}   
+
+var stderrRing = new LinesRing(100);//linesRing(100);
+stderrRing.callback(function(line) {
+    var p = stderrRing.extractProgress(line, 300)
+    console.log(JSON.stringify(p,0,2))
+});
 //var youtube = googleapis.youtube('v3');
 
 //https://www.youtube.com/watch?v=JRfuAukYTKg SUPER !
@@ -202,7 +385,7 @@ class Youtube {
             console.log('data: ', data)
           },
           stderr: function(data) {
-            console.log('data: ', String.fromCharCode(data));
+            console.log('data: ', data.charCodeAt());//String.fromCharCode(data));
           },
         });
         // Write out.webm to disk.
@@ -227,18 +410,22 @@ class Youtube {
         let url = 'https://www.youtube.com/watch?v=1w7OgIMMRc4'
         let stream = ytdl(url, options);
         stream
-        .pipe(mux)
+        
         .on('info', (info, format) => {
             fs.stat(p, (error, stats) => {
                 if (error) {
                     fs.mkdirSync(p);
                 }
                 console.log('download', info.title);
-                this.createSong(stream);
+                //this.createSong(stream);
+                //this.coco(stream);
             });
         })
+        .pipe(mux)
         .on('finish', () => {
+            console.log('donwload finish !')
             this.coco(mux.toArray())
+
         })
         .on('error', (error) => {
             //self.emit('error', error);
@@ -307,6 +494,8 @@ class Youtube {
     }
     coco (data, output) {
         // Encode test video to VP8.
+        let str = '';
+
         var result = ffmpeg_mp4({
           MEMFS: [{name: "video.flv", data: data}],
           //arguments: ["-i", "video.flv", "-b:a", "192K", "-vn", "out.mp3"],
@@ -317,7 +506,14 @@ class Youtube {
             console.log('data: ', data)
           },
           stderr: function(data) {
-            console.log('data: ', String.fromCharCode(data));
+            //console.log('data: ', data);
+            str = str.concat(String.fromCharCode(data));
+            if(data == 13) {
+                //console.log(str)
+                //console.log(stderrRing.get())
+                str = ''
+            }
+            stderrRing.append(String.fromCharCode(data))
           },
         });
         // Write out.webm to disk.
@@ -333,9 +529,10 @@ class Youtube {
             console.log('converted!')
         })
         .on('progress', function(progress) {
-            process.stdout.cursorTo(0);
+            /*process.stdout.cursorTo(0);
             process.stdout.clearLine(1);
-            process.stdout.write(progress.timemark);
+            process.stdout.write(progress.timemark);*/
+            console.log(JSON.stringify(progress,0,2))
         })
         .on('end', function() {
             console.log('end conversion!')
